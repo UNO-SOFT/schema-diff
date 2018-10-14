@@ -116,10 +116,10 @@ func (O CompareOptions) Compare(ctx context.Context, localDB, remoteDB *sql.DB) 
 	}
 	const colQry = `SELECT
     column_name
-    , nullable
     , (CASE data_type WHEN 'DATE' THEN 'DATE'
 	                  WHEN 'NUMBER' THEN 'NUMBER('||data_precision||','||data_scale||')'
-					  ELSE data_type||'('||data_length||')' END) data_type
+					  ELSE data_type||'('||data_length||')' END)||
+	   (CASE nullable WHEN 'N' THEN ' NOT NULL' ELSE '' END) data_type
   FROM user_tab_columns
   WHERE table_name = :2
   ORDER BY 1`
@@ -171,11 +171,9 @@ func (O CompareOptions) Compare(ctx context.Context, localDB, remoteDB *sql.DB) 
 					defer rows.Close()
 					for rows.Next() {
 						c := Column{Schema: todo.Schema, Table: name}
-						var nullable string
-						if err = rows.Scan(&c.Name, &nullable, &c.Type); err != nil {
+						if err = rows.Scan(&c.Name, &c.Type); err != nil {
 							return err
 						}
-						c.Nullable = nullable == "Y"
 						*todo.Dest = append(*todo.Dest, c)
 					}
 					return rows.Err()
@@ -235,39 +233,41 @@ type Object struct {
 
 type Column struct {
 	Schema, Table, Name string
-	Nullable            bool
 	Type                string
 }
 
 func (c Column) String() string { return c.Name + " " + c.Type }
 
 func colCompare(local, remote []Column) string {
-	var token struct{}
-	cols := make(map[string]struct{}, 128)
-	var diff strings.Builder
-	for _, c := range local {
-		cols[c.String()] = token
+	n := len(local)
+	if m := len(remote); m > n {
+		n = m
 	}
-	for _, c := range remote {
-		s := c.String()
-		if _, ok := cols[s]; ok {
-			continue
-		}
-		fmt.Fprintln(&diff, "-", s)
+	localM := make(map[string]Column, len(local))
+	for _, c := range local {
+		localM[c.Name] = c
 	}
 
-	for k := range cols {
-		delete(cols, k)
+	var diff strings.Builder
+	for _, r := range remote {
+		if l, ok := localM[r.Name]; !ok {
+			fmt.Fprintf(&diff, "ALTER TABLE %s ADD %s %s;\n", r.Table, r.Name, r.Type)
+		} else if l.Type == r.Type {
+			continue
+		} else {
+			fmt.Fprintf(&diff, "ALTER TABLE %s MODIFY %s %s; --%s\n", r.Table, r.Name, r.Type, l.Type)
+		}
 	}
+
+	remoteM := make(map[string]Column, len(remote))
 	for _, c := range remote {
-		cols[c.String()] = token
+		remoteM[c.Name] = c
 	}
-	for _, c := range local {
-		s := c.String()
-		if _, ok := cols[s]; ok {
+	for _, l := range local {
+		if _, ok := remoteM[l.Name]; ok {
 			continue
 		}
-		fmt.Fprintln(&diff, "+", s)
+		fmt.Fprintf(&diff, "ALTER TABLE %s DROP %s;\n", l.Table, l.Name)
 	}
 
 	return diff.String()
