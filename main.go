@@ -7,13 +7,14 @@ import (
 	"log"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/pkg/errors"
 	"golang.org/x/sync/errgroup"
 	"gopkg.in/alecthomas/kingpin.v2"
 
-	_ "gopkg.in/goracle.v2"
+	goracle "gopkg.in/goracle.v2"
 )
 
 func main() {
@@ -85,44 +86,89 @@ func (O CompareOptions) Compare(ctx context.Context, localDB, remoteDB *sql.DB) 
   WHERE INSTR(:1, object_type) > 0 AND REGEXP_LIKE(object_name, :2)
   ORDER BY 1, 2`
 
+	const colQry = `SELECT
+    table_name
+	, column_name
+    , (CASE data_type WHEN 'DATE' THEN 'DATE'
+	                  WHEN 'NUMBER' THEN 'NUMBER('||data_precision||','||data_scale||')'
+					  ELSE data_type||'('||data_length||')' END)||
+	   (CASE nullable WHEN 'N' THEN ' NOT NULL' ELSE '' END) data_type
+  FROM user_tab_columns
+  WHERE REGEXP_LIKE(table_name, :1)
+  ORDER BY 1, 2`
+
 	var local, remote []Object
 	grp, grpCtx := errgroup.WithContext(ctx)
 	for _, todo := range []struct {
-		DB   *sql.DB
-		Dest *[]Object
+		DB     *sql.DB
+		Schema string
+		Dest   *[]Object
 	}{
-		{DB: localDB, Dest: &local},
-		{DB: remoteDB, Dest: &remote},
+		{DB: localDB, Schema: "local", Dest: &local},
+		{DB: remoteDB, Schema: "remote", Dest: &remote},
 	} {
-		db, dest := todo.DB, todo.Dest
+		todo := todo
 		grp.Go(func() error {
-			rows, err := db.QueryContext(grpCtx, tblQry, types, pat)
+			rows, err := todo.DB.QueryContext(grpCtx, tblQry, types, pat, goracle.FetchRowCount(512))
 			if err != nil {
 				return errors.Wrap(err, tblQry)
 			}
 			defer rows.Close()
+
 			for rows.Next() {
 				var o Object
 				if err = rows.Scan(&o.Name, &o.Type); err != nil {
 					return err
 				}
-				*dest = append(*dest, o)
+				*todo.Dest = append(*todo.Dest, o)
 			}
+			return rows.Err()
+		})
+	}
+
+	loCols := make(map[string][]Column)
+	reCols := make(map[string][]Column)
+	var colsMtx sync.Mutex
+	grpCol, grpColCtx := errgroup.WithContext(ctx)
+	for _, todo := range []struct {
+		DB     *sql.DB
+		Schema string
+		Dest   map[string][]Column
+	}{
+		{DB: localDB, Schema: "local", Dest: loCols},
+		{DB: remoteDB, Schema: "remote", Dest: reCols},
+	} {
+		todo := todo
+		grpCol.Go(func() error {
+			var cols []Column
+			rows, err := todo.DB.QueryContext(grpColCtx, colQry, pat, goracle.FetchRowCount(8192))
+			if err != nil {
+				return errors.Wrap(err, colQry)
+			}
+			defer rows.Close()
+
+			for rows.Next() {
+				c := Column{Schema: todo.Schema}
+				if err = rows.Scan(&c.Table, &c.Name, &c.Type); err != nil {
+					return err
+				}
+				if len(cols) > 0 && cols[len(cols)-1].Table != c.Table {
+					colsMtx.Lock()
+					todo.Dest[cols[len(cols)-1].Table] = cols
+					colsMtx.Unlock()
+					cols = nil
+				}
+				cols = append(cols, c)
+			}
+			colsMtx.Lock()
+			todo.Dest[cols[len(cols)-1].Table] = cols
+			colsMtx.Unlock()
 			return rows.Err()
 		})
 	}
 	if err := grp.Wait(); err != nil {
 		return err
 	}
-	const colQry = `SELECT
-    column_name
-    , (CASE data_type WHEN 'DATE' THEN 'DATE'
-	                  WHEN 'NUMBER' THEN 'NUMBER('||data_precision||','||data_scale||')'
-					  ELSE data_type||'('||data_length||')' END)||
-	   (CASE nullable WHEN 'N' THEN ' NOT NULL' ELSE '' END) data_type
-  FROM user_tab_columns
-  WHERE table_name = :2
-  ORDER BY 1`
 
 	n := len(remote)
 	if n < len(local) {
@@ -151,44 +197,16 @@ func (O CompareOptions) Compare(ctx context.Context, localDB, remoteDB *sql.DB) 
 		}
 		o := o
 		grp.Go(func() error {
-			var local, remote []Column
-			subGrp, subGrpCtx := errgroup.WithContext(grpCtx)
-			for _, todo := range []struct {
-				DB     *sql.DB
-				Schema string
-				Dest   *[]Column
-			}{
-				{DB: localDB, Schema: "local", Dest: &local},
-				{DB: remoteDB, Schema: "remote", Dest: &remote},
-			} {
-				todo := todo
-				name := o.Name
-				subGrp.Go(func() error {
-					rows, err := todo.DB.QueryContext(subGrpCtx, colQry, name)
-					if err != nil {
-						return errors.Wrap(err, colQry)
-					}
-					defer rows.Close()
-					for rows.Next() {
-						c := Column{Schema: todo.Schema, Table: name}
-						if err = rows.Scan(&c.Name, &c.Type); err != nil {
-							return err
-						}
-						*todo.Dest = append(*todo.Dest, c)
-					}
-					return rows.Err()
-				})
-			}
-			if err := subGrp.Wait(); err != nil {
-				return errors.WithMessage(err, o.Name)
-			}
-
-			diff := colCompare(local, remote)
+			<-grpColCtx.Done()
+			diff := colCompare(loCols[o.Name], reCols[o.Name])
 			if diff != "" {
 				colDiffs <- TD{Table: o.Name, Diff: diff}
 			}
 			return nil
 		})
+	}
+	if err := grpCol.Wait(); err != nil {
+		return err
 	}
 	var err error
 	go func() {
