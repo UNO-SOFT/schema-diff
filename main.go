@@ -1,8 +1,11 @@
+// Copyright 2019 Tamás Gulácsi. All rights reserved.
+
 package main
 
 import (
 	"context"
 	"database/sql"
+	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -10,11 +13,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/peterbourgon/ff/ffcli"
 	"github.com/pkg/errors"
 	"golang.org/x/sync/errgroup"
-	"gopkg.in/alecthomas/kingpin.v2"
 
-	goracle "gopkg.in/goracle.v2"
+	"github.com/godror/godror"
 )
 
 func main() {
@@ -26,42 +29,41 @@ func main() {
 func Main() error {
 	var opts CompareOptions
 
-	app := kingpin.New("schema-diff", "compare database scemas")
-	compareCmd := app.Command("compare", "compare the given schemas").Default()
-	localArg := compareCmd.Arg("local", "local database connection string").Default(os.Getenv("BRUNO_ID")).String()
-	remoteArg := compareCmd.Arg("remote", "remote database connection string").String()
-	compareCmd.Flag("type", "object types to compare").Default("TABLE").StringsVar(&opts.Types)
-	compareCmd.Flag("pattern", "REGEXP_LIKE pattern to use").Default("^[RT]_").StringVar(&opts.Pattern)
-	compareCmd.Flag("text", "text diff").Default("false").BoolVar(&opts.TextDiff)
+	fs := flag.NewFlagSet("compare", flag.ExitOnError)
+	opts.Types = []string{"TABLE"}
+	fs.Var(&opts.Types, "type", "object types to compare")
+	fs.StringVar(&opts.Pattern, "pattern", "^[RT}_", "REGEXP_LIKE pattern to use")
+	fs.BoolVar(&opts.TextDiff, "text", false, "text diff")
 
-	todo, err := app.Parse(os.Args[1:])
-	if err != nil {
-		return err
-	}
-	_ = todo
+	compareCmd := ffcli.Command{Name: "schema-diff", ShortHelp: "compare database scemas",
+		FlagSet: fs,
+		Exec: func(args []string) error {
+			localDB, err := sql.Open("godror", args[0])
+			if err != nil {
+				return errors.Wrap(err, args[0])
+			}
+			defer localDB.Close()
+			localDB.SetMaxOpenConns(8)
+			localDB.SetMaxIdleConns(1)
+			remoteDB, err := sql.Open("godror", args[1])
+			if err != nil {
+				return errors.Wrap(err, args[1])
+			}
+			defer remoteDB.Close()
+			remoteDB.SetMaxOpenConns(8)
+			remoteDB.SetMaxIdleConns(1)
 
-	localDB, err := sql.Open("goracle", *localArg)
-	if err != nil {
-		return errors.Wrap(err, *localArg)
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			defer cancel()
+			return opts.Compare(ctx, localDB, remoteDB)
+		},
 	}
-	defer localDB.Close()
-	localDB.SetMaxOpenConns(8)
-	localDB.SetMaxIdleConns(1)
-	remoteDB, err := sql.Open("goracle", *remoteArg)
-	if err != nil {
-		return errors.Wrap(err, *remoteArg)
-	}
-	defer remoteDB.Close()
-	remoteDB.SetMaxOpenConns(8)
-	remoteDB.SetMaxIdleConns(1)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-	return opts.Compare(ctx, localDB, remoteDB)
+	return compareCmd.Run(os.Args[1:])
 }
 
 type CompareOptions struct {
-	Types    []string
+	Types    stringsFlag
 	Pattern  string
 	TextDiff bool
 }
@@ -109,7 +111,7 @@ func (O CompareOptions) Compare(ctx context.Context, localDB, remoteDB *sql.DB) 
 	} {
 		todo := todo
 		grp.Go(func() error {
-			rows, err := todo.DB.QueryContext(grpCtx, tblQry, types, pat, goracle.FetchRowCount(512))
+			rows, err := todo.DB.QueryContext(grpCtx, tblQry, types, pat, godror.FetchRowCount(512))
 			if err != nil {
 				return errors.Wrap(err, tblQry)
 			}
@@ -141,7 +143,7 @@ func (O CompareOptions) Compare(ctx context.Context, localDB, remoteDB *sql.DB) 
 		todo := todo
 		grpCol.Go(func() error {
 			var cols []Column
-			rows, err := todo.DB.QueryContext(grpColCtx, colQry, pat, goracle.FetchRowCount(8192))
+			rows, err := todo.DB.QueryContext(grpColCtx, colQry, pat, godror.FetchRowCount(8192))
 			if err != nil {
 				return errors.Wrap(err, colQry)
 			}
@@ -290,3 +292,8 @@ func colCompare(local, remote []Column) string {
 
 	return diff.String()
 }
+
+type stringsFlag []string
+
+func (ss stringsFlag) String() string      { return strings.Join(ss, ",") }
+func (ss *stringsFlag) Set(s string) error { *ss = append(*ss, s); return nil }
