@@ -3,16 +3,13 @@ module github.com/UNO-SOFT/schema-diff
 go 1.14
 
 require (
-	github.com/alecthomas/template v0.0.0-20190718012654-fb15b899a751 // indirect
-	github.com/alecthomas/units v0.0.0-20190924025748-f65c72e2690d // indirect
-	github.com/go-kit/kit v0.9.0 // indirect
-	github.com/godror/godror v0.19.1
-	github.com/google/go-cmp v0.4.0
-	github.com/peterbourgon/ff v1.7.0
+	github.com/go-logr/zerologr v1.2.2 // indirect
+	github.com/godror/godror v0.33.3
+	github.com/peterbourgon/ff/v3 v3.1.2
 	github.com/pkg/errors v0.9.1
-	go4.org v0.0.0-20200411211856-f5505b9728dd // indirect
-	golang.org/x/sync v0.0.0-20190911185100-cd5d95a43a6e
-	golang.org/x/xerrors v0.0.0-20191204190536-9bdfabe68543 // indirect
-	gopkg.in/alecthomas/kingpin.v2 v2.2.6
-	gopkg.in/goracle.v2 v2.24.1
+	github.com/rs/zerolog v1.27.0 // indirect
+	github.com/tgulacsi/go v0.22.1
+	golang.org/x/sync v0.0.0-20220601150217-0de741cfad7f
+	golang.org/x/term v0.0.0-20220526004731-065cf7ba2467 // indirect
+	google.golang.org/protobuf v1.28.0 // indirect
 )

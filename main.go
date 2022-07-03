@@ -1,4 +1,4 @@
-// Copyright 2019 Tamás Gulácsi. All rights reserved.
+// Copyright 2019, 2022 Tamás Gulácsi. All rights reserved.
 
 package main
 
@@ -7,22 +7,26 @@ import (
 	"database/sql"
 	"flag"
 	"fmt"
-	"log"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/peterbourgon/ff/ffcli"
+	"github.com/peterbourgon/ff/v3/ffcli"
 	"github.com/pkg/errors"
+	"github.com/tgulacsi/go/globalctx"
+	"github.com/tgulacsi/go/zlog"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/godror/godror"
 )
 
+var logger = zlog.New(zlog.MaybeConsoleWriter(os.Stderr))
+
 func main() {
 	if err := Main(); err != nil {
-		log.Fatal(err)
+		logger.Error(err, "Main")
+		os.Exit(1)
 	}
 }
 
@@ -37,7 +41,7 @@ func Main() error {
 
 	compareCmd := ffcli.Command{Name: "schema-diff", ShortHelp: "compare database scemas",
 		FlagSet: fs,
-		Exec: func(args []string) error {
+		Exec: func(ctx context.Context, args []string) error {
 			localDB, err := sql.Open("godror", args[0])
 			if err != nil {
 				return errors.Wrap(err, args[0])
@@ -53,13 +57,15 @@ func Main() error {
 			remoteDB.SetMaxOpenConns(8)
 			remoteDB.SetMaxIdleConns(1)
 
-			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			ctx, cancel := context.WithTimeout(ctx, time.Minute)
 			defer cancel()
 			return opts.Compare(ctx, localDB, remoteDB)
 		},
 	}
 
-	return compareCmd.Run(os.Args[1:])
+	ctx, cancel := globalctx.Wrap(context.Background())
+	defer cancel()
+	return compareCmd.ParseAndRun(ctx, os.Args[1:])
 }
 
 type CompareOptions struct {
