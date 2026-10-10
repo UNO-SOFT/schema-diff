@@ -12,12 +12,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/peterbourgon/ff/v3/ffcli"
 	"github.com/pkg/errors"
 	"github.com/tgulacsi/go/globalctx"
 	"github.com/tgulacsi/go/zlog"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/UNO-SOFT/cli"
 	"github.com/godror/godror"
 )
 
@@ -39,9 +39,10 @@ func Main() error {
 	fs.StringVar(&opts.Pattern, "pattern", "^[RT}_", "REGEXP_LIKE pattern to use")
 	fs.BoolVar(&opts.TextDiff, "text", false, "text diff")
 
-	compareCmd := ffcli.Command{Name: "schema-diff", ShortHelp: "compare database scemas",
-		FlagSet: fs,
-		Exec: func(ctx context.Context, args []string) error {
+	compareCmd := cli.Command{Name: "schema-diff", Summary: "compare database scemas",
+		Flags: fs,
+		Exec: func(ctx context.Context, state *cli.State) error {
+			args := state.Args
 			localDB, err := sql.Open("godror", args[0])
 			if err != nil {
 				return errors.Wrap(err, args[0])
@@ -65,7 +66,7 @@ func Main() error {
 
 	ctx, cancel := globalctx.Wrap(context.Background())
 	defer cancel()
-	return compareCmd.ParseAndRun(ctx, os.Args[1:])
+	return cli.ParseAndRun(ctx, &compareCmd, os.Args[1:], nil)
 }
 
 type CompareOptions struct {
